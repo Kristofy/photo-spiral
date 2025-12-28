@@ -79,10 +79,28 @@
             CANVAS_SIZE_CM: 15,
             CARD_WIDTH_CM: 8.6,
             CARD_HEIGHT_CM: 5.4,
-            DEFAULT_DPI: 300
+            DEFAULT_DPI: 300,
+            PREVIEW_DPI: 50
         };
 
         const cmToPx = (cm, dpi) => (cm / 2.54) * dpi;
+
+        const createPreviewImage = (file) => {
+            return new Promise((resolve) => {
+                const img = new Image();
+                img.onload = () => {
+                    const canvas = document.createElement('canvas');
+                    // Max dimension 600px is plenty for preview tiles
+                    const scale = Math.min(600 / img.width, 600 / img.height, 1);
+                    canvas.width = img.width * scale;
+                    canvas.height = img.height * scale;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                    resolve(canvas.toDataURL('image/jpeg', 0.7));
+                };
+                img.src = URL.createObjectURL(file);
+            });
+        };
 
         const getLayoutConfig = (canvasSizePx, cardWidth, cardHeight) => {
             const toRad = (deg) => deg * (Math.PI / 180);
@@ -121,12 +139,14 @@
             const slots = getLayoutConfig(widthPx, cardWidthPx, cardHeightPx);
 
             // Load images
-            const loadedImages = await Promise.all(images.map(src => {
+            const loadedImages = await Promise.all(images.map(imgObj => {
                 return new Promise((resolve) => {
-                    if (!src) resolve(null);
+                    if (!imgObj) resolve(null);
                     const img = new Image();
                     img.onload = () => resolve(img);
                     img.onerror = () => resolve(null);
+                    // Use preview if low DPI and available
+                    const src = (dpi <= CONSTANTS.PREVIEW_DPI && imgObj.preview) ? imgObj.preview : imgObj.original;
                     img.src = src;
                 });
             }));
@@ -208,14 +228,37 @@
             });
         };
 
+        const generateSheetDataUrl = async (images, settings) => {
+            const canvas = document.createElement('canvas');
+            await drawSpiralSheet(canvas, images, settings);
+            return canvas.toDataURL('image/jpeg', 0.95);
+        };
+
         // ----------------------------------------------------------------------
         // Components
         // ----------------------------------------------------------------------
 
-        const PreviewModal = ({ isOpen, onClose, imageSrc, onNext, onPrev, hasNext, hasPrev, title }) => {
+        const PreviewModal = ({ isOpen, onClose, images, settings, onNext, onPrev, hasNext, hasPrev, title }) => {
             const [rotation, setRotation] = useState(0);
+            const [highResSrc, setHighResSrc] = useState(null);
+            const [isLoading, setIsLoading] = useState(false);
 
-            useEffect(() => setRotation(0), [imageSrc]);
+            useEffect(() => {
+                setRotation(0);
+                setHighResSrc(null);
+            }, [images]);
+
+            useEffect(() => {
+                if (isOpen && images) {
+                    setIsLoading(true);
+                    const timer = setTimeout(async () => {
+                        const src = await generateSheetDataUrl(images, settings);
+                        setHighResSrc(src);
+                        setIsLoading(false);
+                    }, 50);
+                    return () => clearTimeout(timer);
+                }
+            }, [isOpen, images, settings]);
 
             useEffect(() => {
                 const handleKeyDown = (e) => {
@@ -256,7 +299,13 @@
                             )}
 
                             <div className="relative shadow-2xl transition-transform duration-500 ease-in-out z-10" style={{ transform: `rotate(${rotation}deg)` }}>
-                                <img src={imageSrc} alt="Sheet Preview" className="max-h-[calc(100vh-180px)] max-w-[calc(100vw-100px)] object-contain bg-white" />
+                                {isLoading || !highResSrc ? (
+                                    <div className="flex items-center justify-center w-64 h-64 text-white">
+                                        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white"></div>
+                                    </div>
+                                ) : (
+                                    <img src={highResSrc} alt="Sheet Preview" className="max-h-[calc(100vh-180px)] max-w-[calc(100vw-100px)] object-contain bg-white" />
+                                )}
                             </div>
 
                             {hasNext && (
@@ -275,103 +324,132 @@
             );
         };
 
-        const Sidebar = ({ images, settings, onSettingsChange, onUpload, onClear, onDownload, isGenerating }) => {
+        const Sidebar = ({ images, settings, onSettingsChange, onUpload, onClear, onDownload, isGenerating, isUploading }) => {
+            const [isCollapsed, setIsCollapsed] = useState(true);
+
             return (
-                <div className="w-full md:w-80 bg-white border-r border-slate-200 flex flex-col h-screen fixed md:sticky top-0 z-10 overflow-y-auto">
-                    <div className="p-6 border-b border-slate-100">
-                        <h1 className="text-xl font-bold flex items-center gap-2 text-slate-800">
-                            <Icons.Layout className="w-6 h-6 text-indigo-600" />
+                <>
+                    {/* Mobile Header */}
+                    <div className="md:hidden bg-white border-b border-slate-200 p-4 flex justify-between items-center sticky top-0 z-20">
+                        <h1 className="text-lg font-bold flex items-center gap-2 text-slate-800">
+                            <Icons.Layout className="w-5 h-5 text-indigo-600" />
                             PhotoSpiral
                         </h1>
-                        <p className="text-sm text-slate-500 mt-1">Print 15x15cm pinwheel layouts.</p>
-                    </div>
-
-                    <div className="p-6 space-y-8 flex-1">
-                        {/* Upload Section */}
-                        <div className="space-y-3">
-                            <label className="block text-sm font-medium text-slate-700">Photos</label>
-                            <label className="flex flex-col items-center justify-center w-full h-24 border-2 border-indigo-100 border-dashed rounded-lg cursor-pointer bg-indigo-50/50 hover:bg-indigo-50 transition-colors">
-                                <div className="flex flex-col items-center justify-center pt-5 pb-6">
-                                    <Icons.Plus className="w-6 h-6 text-indigo-500 mb-1" />
-                                    <p className="text-xs text-slate-500 font-medium">Add Images</p>
-                                </div>
-                                <input type="file" className="hidden" multiple accept="image/*" onChange={onUpload} />
-                            </label>
-                            <div className="flex justify-between items-center text-sm text-slate-500">
-                                <span>{images.length} photos loaded</span>
-                                {images.length > 0 && (
-                                    <button onClick={onClear} className="text-red-500 hover:text-red-600 flex items-center text-xs">
-                                        <Icons.Trash className="w-3 h-3 mr-1" /> Clear
-                                    </button>
-                                )}
-                            </div>
-                        </div>
-
-                        {/* Settings Section */}
-                        <div className="space-y-6">
-                            <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Configuration</h3>
-                            
-                            <div className="grid grid-cols-2 gap-4">
-                                <div>
-                                    <label className="block text-xs font-medium text-slate-600 mb-1">Card Color</label>
-                                    <div className="flex items-center gap-2">
-                                        <input type="color" value={settings.canvasColor} onChange={(e) => onSettingsChange('canvasColor', e.target.value)} className="w-8 h-8 rounded cursor-pointer border-0 p-0" />
-                                        <span className="text-xs font-mono text-slate-400">{settings.canvasColor}</span>
-                                    </div>
-                                </div>
-                                <div>
-                                    <label className="block text-xs font-medium text-slate-600 mb-1">Cut Lines</label>
-                                    <div className="flex items-center gap-2">
-                                        <input type="color" value={settings.outlineColor} onChange={(e) => onSettingsChange('outlineColor', e.target.value)} className="w-8 h-8 rounded cursor-pointer border-0 p-0" />
-                                        <span className="text-xs font-mono text-slate-400">Color</span>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div>
-                                <div className="flex justify-between mb-1">
-                                    <label className="text-xs font-medium text-slate-600">Border Size</label>
-                                    <span className="text-xs text-slate-400">{settings.borderSizeCm} cm</span>
-                                </div>
-                                <input type="range" min="0" max="1.5" step="0.1" value={settings.borderSizeCm} onChange={(e) => onSettingsChange('borderSizeCm', parseFloat(e.target.value))} className="w-full h-1 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-600" />
-                            </div>
-
-                            <div>
-                                <div className="flex justify-between mb-1">
-                                    <label className="text-xs font-medium text-slate-600">Portrait Alignment</label>
-                                    <span className="text-xs text-slate-400">{settings.portraitOffset}%</span>
-                                </div>
-                                <input type="range" min="-50" max="50" step="5" value={settings.portraitOffset} onChange={(e) => onSettingsChange('portraitOffset', parseInt(e.target.value))} className="w-full h-1 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-600" />
-                                <div className="flex justify-between text-[10px] text-slate-400 mt-1">
-                                    <span>Left</span><span>Center</span><span>Right</span>
-                                </div>
-                            </div>
-                            
-                            <div className="flex items-center gap-2">
-                                    <input type="checkbox" checked={settings.showOutlines} onChange={(e) => onSettingsChange('showOutlines', e.target.checked)} className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" id="showOutlines" />
-                                <label htmlFor="showOutlines" className="text-sm text-slate-600">Show Cut Outlines</label>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div className="p-6 border-t border-slate-100 bg-slate-50">
-                        <button onClick={onDownload} disabled={images.length === 0 || isGenerating} className={`w-full flex items-center justify-center gap-2 py-3 px-4 rounded-lg font-medium transition-all ${images.length === 0 ? 'bg-slate-200 text-slate-400 cursor-not-allowed' : isGenerating ? 'bg-indigo-400 text-white cursor-wait' : 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-lg shadow-indigo-200'}`}>
-                            {isGenerating ? 'Generating...' : <><Icons.Download className="w-4 h-4" /> Download ZIP</>}
+                        <button 
+                            onClick={() => setIsCollapsed(!isCollapsed)}
+                            className="p-2 text-slate-500 hover:bg-slate-100 rounded-lg"
+                        >
+                            {isCollapsed ? 'Settings' : 'Close'}
                         </button>
-                        <p className="text-[10px] text-slate-400 text-center mt-3">Generates 15x15cm sheets @ 300 DPI.</p>
                     </div>
-                </div>
+
+                    <div className={`
+                        w-full md:w-80 bg-white border-r border-slate-200 flex flex-col 
+                        fixed md:sticky top-[60px] md:top-0 z-10 
+                        h-[calc(100vh-60px)] md:h-screen overflow-y-auto
+                        transition-transform duration-300 ease-in-out
+                        ${isCollapsed ? '-translate-x-full md:translate-x-0' : 'translate-x-0'}
+                    `}>
+                        <div className="hidden md:block p-6 border-b border-slate-100">
+                            <h1 className="text-xl font-bold flex items-center gap-2 text-slate-800">
+                                <Icons.Layout className="w-6 h-6 text-indigo-600" />
+                                PhotoSpiral
+                            </h1>
+                            <p className="text-sm text-slate-500 mt-1">Print 15x15cm pinwheel layouts.</p>
+                        </div>
+
+                        <div className="p-6 space-y-8 flex-1">
+                            {/* Upload Section */}
+                            <div className="space-y-3">
+                                <label className="block text-sm font-medium text-slate-700">Photos</label>
+                                <label className={`flex flex-col items-center justify-center w-full h-24 border-2 border-dashed rounded-lg cursor-pointer transition-colors ${isUploading ? 'bg-slate-50 border-slate-200 cursor-wait' : 'border-indigo-100 bg-indigo-50/50 hover:bg-indigo-50'}`}>
+                                    <div className="flex flex-col items-center justify-center pt-5 pb-6">
+                                        {isUploading ? (
+                                            <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-indigo-600"></div>
+                                        ) : (
+                                            <>
+                                                <Icons.Plus className="w-6 h-6 text-indigo-500 mb-1" />
+                                                <p className="text-xs text-slate-500 font-medium">Add Images</p>
+                                            </>
+                                        )}
+                                    </div>
+                                    <input type="file" className="hidden" multiple accept="image/*" onChange={onUpload} disabled={isUploading} />
+                                </label>
+                                <div className="flex justify-between items-center text-sm text-slate-500">
+                                    <span>{images.length} photos loaded</span>
+                                    {images.length > 0 && (
+                                        <button onClick={onClear} className="text-red-500 hover:text-red-600 flex items-center text-xs">
+                                            <Icons.Trash className="w-3 h-3 mr-1" /> Clear
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+
+                            {/* Settings Section */}
+                            <div className="space-y-6">
+                                <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Configuration</h3>
+                                
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div>
+                                        <label className="block text-xs font-medium text-slate-600 mb-1">Card Color</label>
+                                        <div className="flex items-center gap-2">
+                                            <input type="color" value={settings.canvasColor} onChange={(e) => onSettingsChange('canvasColor', e.target.value)} className="w-8 h-8 rounded cursor-pointer border-0 p-0" />
+                                            <span className="text-xs font-mono text-slate-400">{settings.canvasColor}</span>
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-medium text-slate-600 mb-1">Cut Lines</label>
+                                        <div className="flex items-center gap-2">
+                                            <input type="color" value={settings.outlineColor} onChange={(e) => onSettingsChange('outlineColor', e.target.value)} className="w-8 h-8 rounded cursor-pointer border-0 p-0" />
+                                            <span className="text-xs font-mono text-slate-400">Color</span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div>
+                                    <div className="flex justify-between mb-1">
+                                        <label className="text-xs font-medium text-slate-600">Border Size</label>
+                                        <span className="text-xs text-slate-400">{settings.borderSizeCm} cm</span>
+                                    </div>
+                                    <input type="range" min="0" max="1.5" step="0.1" value={settings.borderSizeCm} onChange={(e) => onSettingsChange('borderSizeCm', parseFloat(e.target.value))} className="w-full h-1 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-600" />
+                                </div>
+
+                                <div>
+                                    <div className="flex justify-between mb-1">
+                                        <label className="text-xs font-medium text-slate-600">Portrait Alignment</label>
+                                        <span className="text-xs text-slate-400">{settings.portraitOffset}%</span>
+                                    </div>
+                                    <input type="range" min="-50" max="50" step="5" value={settings.portraitOffset} onChange={(e) => onSettingsChange('portraitOffset', parseInt(e.target.value))} className="w-full h-1 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-600" />
+                                    <div className="flex justify-between text-[10px] text-slate-400 mt-1">
+                                        <span>Left</span><span>Center</span><span>Right</span>
+                                    </div>
+                                </div>
+                                
+                                <div className="flex items-center gap-2">
+                                        <input type="checkbox" checked={settings.showOutlines} onChange={(e) => onSettingsChange('showOutlines', e.target.checked)} className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" id="showOutlines" />
+                                    <label htmlFor="showOutlines" className="text-sm text-slate-600">Show Cut Outlines</label>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="p-6 border-t border-slate-100 bg-slate-50">
+                            <button onClick={onDownload} disabled={images.length === 0 || isGenerating} className={`w-full flex items-center justify-center gap-2 py-3 px-4 rounded-lg font-medium transition-all ${images.length === 0 ? 'bg-slate-200 text-slate-400 cursor-not-allowed' : isGenerating ? 'bg-indigo-400 text-white cursor-wait' : 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-lg shadow-indigo-200'}`}>
+                                {isGenerating ? 'Generating...' : <><Icons.Download className="w-4 h-4" /> Download ZIP</>}
+                            </button>
+                            <p className="text-[10px] text-slate-400 text-center mt-3">Generates 15x15cm sheets @ 300 DPI.</p>
+                        </div>
+                    </div>
+                </>
             );
         };
 
-        const CanvasRenderer = ({ images, index, settings, onCanvasReady, onClick }) => {
+        const CanvasRenderer = ({ images, index, settings, onClick }) => {
             const canvasRef = useRef(null);
 
             useEffect(() => {
-                drawSpiralSheet(canvasRef.current, images, settings).then(() => {
-                    if (onCanvasReady) onCanvasReady(index, canvasRef.current);
-                });
-            }, [images, settings, index, onCanvasReady]);
+                // Use PREVIEW_DPI for fast rendering
+                drawSpiralSheet(canvasRef.current, images, { ...settings, dpi: CONSTANTS.PREVIEW_DPI });
+            }, [images, settings]);
 
             return (
                 <div onClick={onClick} className="canvas-preview-wrapper relative group bg-white rounded-sm">
@@ -402,19 +480,42 @@
                 dpi: CONSTANTS.DEFAULT_DPI
             });
             const [isGenerating, setIsGenerating] = useState(false);
-            const [modalState, setModalState] = useState({ isOpen: false, index: 0, src: null });
+            const [isUploading, setIsUploading] = useState(false);
+            const [modalState, setModalState] = useState({ isOpen: false, index: 0 });
             
-            const canvasRefs = useRef({});
-
-            const handleFileUpload = (e) => {
-                const files = Array.from(e.target.files);
-                const newImages = files.map(file => URL.createObjectURL(file));
-                setImages(prev => [...prev, ...newImages]);
+            const handleFileUpload = async (e) => {
+                setIsUploading(true);
+                // Small delay to allow UI to update
+                await new Promise(r => setTimeout(r, 50));
+                
+                try {
+                    const files = Array.from(e.target.files);
+                    // Create both original and preview versions
+                    const newImages = await Promise.all(files.map(async (file) => {
+                        const original = URL.createObjectURL(file);
+                        const preview = await createPreviewImage(file);
+                        return { original, preview };
+                    }));
+                    setImages(prev => [...prev, ...newImages]);
+                } catch (error) {
+                    console.error("Upload error:", error);
+                    alert("Failed to process images.");
+                } finally {
+                    setIsUploading(false);
+                    // Reset file input
+                    e.target.value = '';
+                }
             };
 
             const handleSettingsChange = (key, value) => {
                 setSettings(prev => ({ ...prev, [key]: value }));
             };
+
+            const chunks = useMemo(() => {
+                const res = [];
+                for (let i = 0; i < images.length; i += 4) res.push(images.slice(i, i + 4));
+                return res;
+            }, [images]);
 
             const handleDownloadZIP = async () => {
                 setIsGenerating(true);
@@ -422,14 +523,11 @@
 
                 try {
                     const zip = new JSZip();
-                    const canvasCount = Math.ceil(images.length / 4);
                     
-                    for (let i = 0; i < canvasCount; i++) {
-                        const canvas = canvasRefs.current[i];
-                        if (canvas) {
-                            const dataUrl = canvas.toDataURL('image/jpeg', 1.0);
-                            zip.file(`sheet-${i + 1}.jpg`, dataUrl.replace(/^data:image\/jpeg;base64,/, ""), {base64: true});
-                        }
+                    for (let i = 0; i < chunks.length; i++) {
+                        const chunk = chunks[i];
+                        const dataUrl = await generateSheetDataUrl(chunk, settings);
+                        zip.file(`sheet-${i + 1}.jpg`, dataUrl.replace(/^data:image\/jpeg;base64,/, ""), {base64: true});
                     }
                     const content = await zip.generateAsync({type:"blob"});
                     saveAs(content, "photo-sheets.zip");
@@ -443,21 +541,15 @@
 
             // Modal Logic
             const openModal = (index) => {
-                const canvas = canvasRefs.current[index];
-                if (canvas) setModalState({ isOpen: true, index, src: canvas.toDataURL() });
+                setModalState({ isOpen: true, index });
             };
             
             const navigateModal = (direction) => {
                 const newIndex = modalState.index + direction;
-                const canvas = canvasRefs.current[newIndex];
-                if (canvas) setModalState({ isOpen: true, index: newIndex, src: canvas.toDataURL() });
+                if (newIndex >= 0 && newIndex < chunks.length) {
+                    setModalState({ isOpen: true, index: newIndex });
+                }
             };
-
-            const chunks = useMemo(() => {
-                const res = [];
-                for (let i = 0; i < images.length; i += 4) res.push(images.slice(i, i + 4));
-                return res;
-            }, [images]);
 
             return (
                 <div className="min-h-screen flex flex-col md:flex-row">
@@ -466,12 +558,13 @@
                         settings={settings}
                         onSettingsChange={handleSettingsChange}
                         onUpload={handleFileUpload}
-                        onClear={() => { setImages([]); canvasRefs.current = {}; }}
+                        onClear={() => { setImages([]); }}
                         onDownload={handleDownloadZIP}
                         isGenerating={isGenerating}
+                        isUploading={isUploading}
                     />
 
-                    <div className="flex-1 p-8 bg-slate-50/50 overflow-y-auto">
+                    <div className="flex-1 p-4 md:p-8 bg-slate-50/50 overflow-y-auto">
                         {images.length === 0 ? (
                             <div className="h-full flex flex-col items-center justify-center text-slate-400 min-h-[50vh]">
                                 <Icons.Image className="w-16 h-16 mb-4 opacity-20" />
@@ -480,7 +573,7 @@
                             </div>
                         ) : (
                             <div className="max-w-5xl mx-auto">
-                                <div className="flex items-center justify-between mb-6">
+                                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between mb-6 gap-2">
                                     <h2 className="text-lg font-semibold text-slate-800">Preview Sheets ({chunks.length})</h2>
                                     <div className="text-sm text-slate-500">Printing Tip: Print at 100% Scale / Actual Size</div>
                                 </div>
@@ -492,7 +585,6 @@
                                                 images={chunk} 
                                                 index={idx}
                                                 settings={settings}
-                                                onCanvasReady={(i, cvs) => { canvasRefs.current[i] = cvs; }}
                                                 onClick={() => openModal(idx)}
                                             />
                                             <div className="text-center text-xs text-slate-400">Sheet {idx + 1}</div>
@@ -506,7 +598,8 @@
                     <PreviewModal 
                         isOpen={modalState.isOpen}
                         onClose={() => setModalState(prev => ({ ...prev, isOpen: false }))}
-                        imageSrc={modalState.src}
+                        images={chunks[modalState.index]}
+                        settings={settings}
                         title={`Sheet ${modalState.index + 1}`}
                         onNext={() => navigateModal(1)}
                         onPrev={() => navigateModal(-1)}
