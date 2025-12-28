@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Spiral Photo Sheet Generator</title>
+    
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    
+    <!-- Babel -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- JSZip & FileSaver -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap');
+        
+        body { 
+            font-family: 'Inter', sans-serif; 
+        }
+        
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #f1f1f1; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+        .canvas-preview-wrapper {
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+            transition: transform 0.2s;
+            cursor: pointer;
+        }
+        .canvas-preview-wrapper:hover {
+            transform: translateY(-2px);
+            ring: 2px solid #6366f1;
+        }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-800">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useMemo } = React;
+
+        // ----------------------------------------------------------------------
+        // Icons
+        // ----------------------------------------------------------------------
+        
+        const Icon = ({ children, ...props }) => (
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}>
+                {children}
+            </svg>
+        );
+
+        const Icons = {
+            Layout: (props) => <Icon {...props}><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><line x1="3" x2="21" y1="9" y2="9"/><line x1="9" x2="9" y1="21" y2="9"/></Icon>,
+            Plus: (props) => <Icon {...props}><path d="M5 12h14"/><path d="M12 5v14"/></Icon>,
+            Trash: (props) => <Icon {...props}><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></Icon>,
+            Download: (props) => <Icon {...props}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></Icon>,
+            Image: (props) => <Icon {...props}><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></Icon>,
+            Rotate: (props) => <Icon {...props}><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></Icon>,
+            X: (props) => <Icon {...props}><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></Icon>,
+            ChevronLeft: (props) => <Icon {...props}><polyline points="15 18 9 12 15 6"/></Icon>,
+            ChevronRight: (props) => <Icon {...props}><polyline points="9 18 15 12 9 6"/></Icon>,
+        };
+
+        // ----------------------------------------------------------------------
+        // Constants & Helpers
+        // ----------------------------------------------------------------------
+
+        const CONSTANTS = {
+            CANVAS_SIZE_CM: 15,
+            CARD_WIDTH_CM: 8.6,
+            CARD_HEIGHT_CM: 5.4,
+            DEFAULT_DPI: 300
+        };
+
+        const cmToPx = (cm, dpi) => (cm / 2.54) * dpi;
+
+        const getLayoutConfig = (canvasSizePx, cardWidth, cardHeight) => {
+            const toRad = (deg) => deg * (Math.PI / 180);
+            
+            return [
+                // Slot 1: Top-Left (Vertical)
+                { id: 1, x: cardHeight / 2, y: cardWidth / 2, rotation: toRad(270) },
+                // Slot 2: Top-Right (Horizontal)
+                { id: 2, x: canvasSizePx - (cardWidth / 2), y: cardHeight / 2, rotation: 0 },
+                // Slot 3: Bottom-Right (Vertical)
+                { id: 3, x: canvasSizePx - (cardHeight / 2), y: canvasSizePx - (cardWidth / 2), rotation: toRad(90) },
+                // Slot 4: Bottom-Left (Horizontal)
+                { id: 4, x: cardWidth / 2, y: canvasSizePx - (cardHeight / 2), rotation: toRad(180) }
+            ];
+        };
+
+        const drawSpiralSheet = async (canvas, images, settings) => {
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+            const { dpi, canvasColor, outlineColor, borderSizeCm, portraitOffset, showOutlines } = settings;
+
+            const widthPx = cmToPx(CONSTANTS.CANVAS_SIZE_CM, dpi);
+            const heightPx = cmToPx(CONSTANTS.CANVAS_SIZE_CM, dpi);
+            const cardWidthPx = cmToPx(CONSTANTS.CARD_WIDTH_CM, dpi);
+            const cardHeightPx = cmToPx(CONSTANTS.CARD_HEIGHT_CM, dpi);
+            const borderPx = cmToPx(borderSizeCm, dpi);
+
+            // Set dimensions
+            canvas.width = widthPx;
+            canvas.height = heightPx;
+
+            // Fill Background
+            ctx.fillStyle = '#FFFFFF';
+            ctx.fillRect(0, 0, widthPx, heightPx);
+
+            const slots = getLayoutConfig(widthPx, cardWidthPx, cardHeightPx);
+
+            // Load images
+            const loadedImages = await Promise.all(images.map(src => {
+                return new Promise((resolve) => {
+                    if (!src) resolve(null);
+                    const img = new Image();
+                    img.onload = () => resolve(img);
+                    img.onerror = () => resolve(null);
+                    img.src = src;
+                });
+            }));
+
+            slots.forEach((slot, i) => {
+                const img = loadedImages[i];
+                
+                ctx.save();
+                ctx.translate(slot.x, slot.y);
+                ctx.rotate(slot.rotation);
+
+                const halfCardW = cardWidthPx / 2;
+                const halfCardH = cardHeightPx / 2;
+
+                // Draw Card Background
+                ctx.fillStyle = canvasColor;
+                ctx.fillRect(-halfCardW, -halfCardH, cardWidthPx, cardHeightPx);
+
+                // Draw Image Area
+                const innerWidth = cardWidthPx - (borderPx * 2);
+                const innerHeight = cardHeightPx - (borderPx * 2);
+
+                ctx.save();
+                if (img) {
+                    const imgRatio = img.width / img.height;
+                    const boxRatio = innerWidth / innerHeight;
+                    let drawW, drawH;
+
+                    if (imgRatio > boxRatio) {
+                        drawW = innerWidth;
+                        drawH = innerWidth / imgRatio;
+                    } else {
+                        drawH = innerHeight;
+                        drawW = innerHeight * imgRatio;
+                    }
+
+                    let drawX = -drawW / 2;
+                    let drawY = -drawH / 2;
+
+                    // Portrait offset logic
+                    const isPortrait = img.height > img.width;
+                    const freeSpaceX = innerWidth - drawW;
+                    if (isPortrait && freeSpaceX > 0) {
+                        const offsetPx = (freeSpaceX / 2) * (portraitOffset / 50);
+                        drawX += offsetPx;
+                    }
+
+                    ctx.beginPath();
+                    ctx.rect(-innerWidth/2, -innerHeight/2, innerWidth, innerHeight);
+                    ctx.clip();
+                    ctx.drawImage(img, drawX, drawY, drawW, drawH);
+                } else {
+                    // Empty State
+                    ctx.fillStyle = "#cbd5e1";
+                    ctx.font = `${cmToPx(0.5, dpi)}px sans-serif`;
+                    ctx.textAlign = "center";
+                    ctx.textBaseline = "middle";
+                    ctx.fillText("Empty", 0, 0);
+                }
+                ctx.restore();
+
+                // Draw Cutlines (L-shape on inner corner)
+                if (showOutlines) {
+                    ctx.strokeStyle = outlineColor;
+                    const lineWidth = cmToPx(0.05, dpi) + 1; 
+                    ctx.lineWidth = lineWidth;
+                    
+                    const leftPathX = -halfCardW - (lineWidth / 2);
+                    const bottomPathY = halfCardH + (lineWidth / 2);
+                    
+                    ctx.beginPath();
+                    ctx.moveTo(leftPathX, -halfCardH); 
+                    ctx.lineTo(leftPathX, bottomPathY);
+                    ctx.lineTo(halfCardW, bottomPathY);
+                    ctx.stroke();
+                }
+
+                ctx.restore();
+            });
+        };
+
+        // ----------------------------------------------------------------------
+        // Components
+        // ----------------------------------------------------------------------
+
+        const PreviewModal = ({ isOpen, onClose, imageSrc, onNext, onPrev, hasNext, hasPrev, title }) => {
+            const [rotation, setRotation] = useState(0);
+
+            useEffect(() => setRotation(0), [imageSrc]);
+
+            useEffect(() => {
+                const handleKeyDown = (e) => {
+                    if (!isOpen) return;
+                    if (e.key === 'Escape') onClose();
+                    if (e.key === 'ArrowRight' && hasNext) onNext();
+                    if (e.key === 'ArrowLeft' && hasPrev) onPrev();
+                };
+                window.addEventListener('keydown', handleKeyDown);
+                return () => window.removeEventListener('keydown', handleKeyDown);
+            }, [isOpen, hasNext, hasPrev, onNext, onPrev, onClose]);
+
+            if (!isOpen) return null;
+
+            return (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/95 backdrop-blur-sm p-4">
+                    <div className="w-full max-w-7xl h-full flex flex-col">
+                        
+                        {/* Header - Static Flex Item */}
+                        <div className="flex justify-between items-center text-white p-4 shrink-0">
+                            <h2 className="text-lg font-semibold">{title}</h2>
+                            <div className="flex items-center gap-4">
+                                <button onClick={() => setRotation(r => r + 90)} className="p-2 bg-white/10 hover:bg-white/20 rounded-full transition-colors" title="Rotate View">
+                                    <Icons.Rotate className="w-5 h-5" />
+                                </button>
+                                <button onClick={onClose} className="p-2 bg-white/10 hover:bg-white/20 rounded-full transition-colors" title="Close">
+                                    <Icons.X className="w-6 h-6" />
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Image Viewer - Flex Grow */}
+                        <div className="flex-1 flex items-center justify-center overflow-hidden relative min-h-0">
+                            {hasPrev && (
+                                <button onClick={(e) => { e.stopPropagation(); onPrev(); }} className="absolute left-0 md:left-4 z-50 p-3 text-white bg-black/30 hover:bg-black/50 rounded-full transition-all backdrop-blur-sm">
+                                    <Icons.ChevronLeft className="w-8 h-8" />
+                                </button>
+                            )}
+
+                            <div className="relative shadow-2xl transition-transform duration-500 ease-in-out z-10" style={{ transform: `rotate(${rotation}deg)` }}>
+                                <img src={imageSrc} alt="Sheet Preview" className="max-h-[calc(100vh-180px)] max-w-[calc(100vw-100px)] object-contain bg-white" />
+                            </div>
+
+                            {hasNext && (
+                                <button onClick={(e) => { e.stopPropagation(); onNext(); }} className="absolute right-0 md:right-4 z-50 p-3 text-white bg-black/30 hover:bg-black/50 rounded-full transition-all backdrop-blur-sm">
+                                    <Icons.ChevronRight className="w-8 h-8" />
+                                </button>
+                            )}
+                        </div>
+                        
+                        {/* Footer - Static Flex Item */}
+                        <div className="p-4 text-center text-slate-400 text-sm shrink-0">
+                            Use Arrow keys to navigate • Esc to close
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const Sidebar = ({ images, settings, onSettingsChange, onUpload, onClear, onDownload, isGenerating }) => {
+            return (
+                <div className="w-full md:w-80 bg-white border-r border-slate-200 flex flex-col h-screen fixed md:sticky top-0 z-10 overflow-y-auto">
+                    <div className="p-6 border-b border-slate-100">
+                        <h1 className="text-xl font-bold flex items-center gap-2 text-slate-800">
+                            <Icons.Layout className="w-6 h-6 text-indigo-600" />
+                            PhotoSpiral
+                        </h1>
+                        <p className="text-sm text-slate-500 mt-1">Print 15x15cm pinwheel layouts.</p>
+                    </div>
+
+                    <div className="p-6 space-y-8 flex-1">
+                        {/* Upload Section */}
+                        <div className="space-y-3">
+                            <label className="block text-sm font-medium text-slate-700">Photos</label>
+                            <label className="flex flex-col items-center justify-center w-full h-24 border-2 border-indigo-100 border-dashed rounded-lg cursor-pointer bg-indigo-50/50 hover:bg-indigo-50 transition-colors">
+                                <div className="flex flex-col items-center justify-center pt-5 pb-6">
+                                    <Icons.Plus className="w-6 h-6 text-indigo-500 mb-1" />
+                                    <p className="text-xs text-slate-500 font-medium">Add Images</p>
+                                </div>
+                                <input type="file" className="hidden" multiple accept="image/*" onChange={onUpload} />
+                            </label>
+                            <div className="flex justify-between items-center text-sm text-slate-500">
+                                <span>{images.length} photos loaded</span>
+                                {images.length > 0 && (
+                                    <button onClick={onClear} className="text-red-500 hover:text-red-600 flex items-center text-xs">
+                                        <Icons.Trash className="w-3 h-3 mr-1" /> Clear
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+
+                        {/* Settings Section */}
+                        <div className="space-y-6">
+                            <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Configuration</h3>
+                            
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-xs font-medium text-slate-600 mb-1">Card Color</label>
+                                    <div className="flex items-center gap-2">
+                                        <input type="color" value={settings.canvasColor} onChange={(e) => onSettingsChange('canvasColor', e.target.value)} className="w-8 h-8 rounded cursor-pointer border-0 p-0" />
+                                        <span className="text-xs font-mono text-slate-400">{settings.canvasColor}</span>
+                                    </div>
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-medium text-slate-600 mb-1">Cut Lines</label>
+                                    <div className="flex items-center gap-2">
+                                        <input type="color" value={settings.outlineColor} onChange={(e) => onSettingsChange('outlineColor', e.target.value)} className="w-8 h-8 rounded cursor-pointer border-0 p-0" />
+                                        <span className="text-xs font-mono text-slate-400">Color</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div>
+                                <div className="flex justify-between mb-1">
+                                    <label className="text-xs font-medium text-slate-600">Border Size</label>
+                                    <span className="text-xs text-slate-400">{settings.borderSizeCm} cm</span>
+                                </div>
+                                <input type="range" min="0" max="1.5" step="0.1" value={settings.borderSizeCm} onChange={(e) => onSettingsChange('borderSizeCm', parseFloat(e.target.value))} className="w-full h-1 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-600" />
+                            </div>
+
+                            <div>
+                                <div className="flex justify-between mb-1">
+                                    <label className="text-xs font-medium text-slate-600">Portrait Alignment</label>
+                                    <span className="text-xs text-slate-400">{settings.portraitOffset}%</span>
+                                </div>
+                                <input type="range" min="-50" max="50" step="5" value={settings.portraitOffset} onChange={(e) => onSettingsChange('portraitOffset', parseInt(e.target.value))} className="w-full h-1 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-600" />
+                                <div className="flex justify-between text-[10px] text-slate-400 mt-1">
+                                    <span>Left</span><span>Center</span><span>Right</span>
+                                </div>
+                            </div>
+                            
+                            <div className="flex items-center gap-2">
+                                    <input type="checkbox" checked={settings.showOutlines} onChange={(e) => onSettingsChange('showOutlines', e.target.checked)} className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500" id="showOutlines" />
+                                <label htmlFor="showOutlines" className="text-sm text-slate-600">Show Cut Outlines</label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="p-6 border-t border-slate-100 bg-slate-50">
+                        <button onClick={onDownload} disabled={images.length === 0 || isGenerating} className={`w-full flex items-center justify-center gap-2 py-3 px-4 rounded-lg font-medium transition-all ${images.length === 0 ? 'bg-slate-200 text-slate-400 cursor-not-allowed' : isGenerating ? 'bg-indigo-400 text-white cursor-wait' : 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-lg shadow-indigo-200'}`}>
+                            {isGenerating ? 'Generating...' : <><Icons.Download className="w-4 h-4" /> Download ZIP</>}
+                        </button>
+                        <p className="text-[10px] text-slate-400 text-center mt-3">Generates 15x15cm sheets @ 300 DPI.</p>
+                    </div>
+                </div>
+            );
+        };
+
+        const CanvasRenderer = ({ images, index, settings, onCanvasReady, onClick }) => {
+            const canvasRef = useRef(null);
+
+            useEffect(() => {
+                drawSpiralSheet(canvasRef.current, images, settings).then(() => {
+                    if (onCanvasReady) onCanvasReady(index, canvasRef.current);
+                });
+            }, [images, settings, index, onCanvasReady]);
+
+            return (
+                <div onClick={onClick} className="canvas-preview-wrapper relative group bg-white rounded-sm">
+                    <canvas ref={canvasRef} className="w-full h-auto" style={{ maxWidth: '100%', aspectRatio: '1/1' }} />
+                    <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <span className="bg-black/70 text-white text-xs px-2 py-1 rounded">Sheet {index + 1}</span>
+                    </div>
+                    <div className="absolute inset-0 bg-black/0 group-hover:bg-black/5 transition-colors flex items-center justify-center">
+                        <span className="opacity-0 group-hover:opacity-100 bg-white shadow-lg px-3 py-1.5 rounded-full text-xs font-medium text-slate-700">Click to Expand</span>
+                    </div>
+                </div>
+            );
+        };
+
+        // ----------------------------------------------------------------------
+        // Main App
+        // ----------------------------------------------------------------------
+
+        const App = () => {
+            const [images, setImages] = useState([]);
+            const [settings, setSettings] = useState({
+                canvasColor: '#FBFAF5',
+                borderColor: '#FFFFFF',
+                outlineColor: '#000000',
+                borderSizeCm: 0.5,
+                portraitOffset: -30, 
+                showOutlines: true,
+                dpi: CONSTANTS.DEFAULT_DPI
+            });
+            const [isGenerating, setIsGenerating] = useState(false);
+            const [modalState, setModalState] = useState({ isOpen: false, index: 0, src: null });
+            
+            const canvasRefs = useRef({});
+
+            const handleFileUpload = (e) => {
+                const files = Array.from(e.target.files);
+                const newImages = files.map(file => URL.createObjectURL(file));
+                setImages(prev => [...prev, ...newImages]);
+            };
+
+            const handleSettingsChange = (key, value) => {
+                setSettings(prev => ({ ...prev, [key]: value }));
+            };
+
+            const handleDownloadZIP = async () => {
+                setIsGenerating(true);
+                await new Promise(r => setTimeout(r, 100)); // UI Update
+
+                try {
+                    const zip = new JSZip();
+                    const canvasCount = Math.ceil(images.length / 4);
+                    
+                    for (let i = 0; i < canvasCount; i++) {
+                        const canvas = canvasRefs.current[i];
+                        if (canvas) {
+                            const dataUrl = canvas.toDataURL('image/jpeg', 1.0);
+                            zip.file(`sheet-${i + 1}.jpg`, dataUrl.replace(/^data:image\/jpeg;base64,/, ""), {base64: true});
+                        }
+                    }
+                    const content = await zip.generateAsync({type:"blob"});
+                    saveAs(content, "photo-sheets.zip");
+                } catch (err) {
+                    console.error("ZIP Gen Error", err);
+                    alert("Failed to generate ZIP.");
+                } finally {
+                    setIsGenerating(false);
+                }
+            };
+
+            // Modal Logic
+            const openModal = (index) => {
+                const canvas = canvasRefs.current[index];
+                if (canvas) setModalState({ isOpen: true, index, src: canvas.toDataURL() });
+            };
+            
+            const navigateModal = (direction) => {
+                const newIndex = modalState.index + direction;
+                const canvas = canvasRefs.current[newIndex];
+                if (canvas) setModalState({ isOpen: true, index: newIndex, src: canvas.toDataURL() });
+            };
+
+            const chunks = useMemo(() => {
+                const res = [];
+                for (let i = 0; i < images.length; i += 4) res.push(images.slice(i, i + 4));
+                return res;
+            }, [images]);
+
+            return (
+                <div className="min-h-screen flex flex-col md:flex-row">
+                    <Sidebar 
+                        images={images}
+                        settings={settings}
+                        onSettingsChange={handleSettingsChange}
+                        onUpload={handleFileUpload}
+                        onClear={() => { setImages([]); canvasRefs.current = {}; }}
+                        onDownload={handleDownloadZIP}
+                        isGenerating={isGenerating}
+                    />
+
+                    <div className="flex-1 p-8 bg-slate-50/50 overflow-y-auto">
+                        {images.length === 0 ? (
+                            <div className="h-full flex flex-col items-center justify-center text-slate-400 min-h-[50vh]">
+                                <Icons.Image className="w-16 h-16 mb-4 opacity-20" />
+                                <p className="text-lg font-medium">No images uploaded</p>
+                                <p className="text-sm">Upload photos to see the spiral layout.</p>
+                            </div>
+                        ) : (
+                            <div className="max-w-5xl mx-auto">
+                                <div className="flex items-center justify-between mb-6">
+                                    <h2 className="text-lg font-semibold text-slate-800">Preview Sheets ({chunks.length})</h2>
+                                    <div className="text-sm text-slate-500">Printing Tip: Print at 100% Scale / Actual Size</div>
+                                </div>
+                                
+                                <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-8">
+                                    {chunks.map((chunk, idx) => (
+                                        <div key={idx} className="flex flex-col gap-2">
+                                            <CanvasRenderer 
+                                                images={chunk} 
+                                                index={idx}
+                                                settings={settings}
+                                                onCanvasReady={(i, cvs) => { canvasRefs.current[i] = cvs; }}
+                                                onClick={() => openModal(idx)}
+                                            />
+                                            <div className="text-center text-xs text-slate-400">Sheet {idx + 1}</div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+
+                    <PreviewModal 
+                        isOpen={modalState.isOpen}
+                        onClose={() => setModalState(prev => ({ ...prev, isOpen: false }))}
+                        imageSrc={modalState.src}
+                        title={`Sheet ${modalState.index + 1}`}
+                        onNext={() => navigateModal(1)}
+                        onPrev={() => navigateModal(-1)}
+                        hasNext={modalState.index < chunks.length - 1}
+                        hasPrev={modalState.index > 0}
+                    />
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
